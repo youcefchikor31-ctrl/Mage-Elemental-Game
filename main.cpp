@@ -43,7 +43,6 @@ int main(int argc, char *argv[]) {
     (void)argc;
     (void)argv;
 
-    // أخذ كامل أبعاد شاشة الهاتف تلقائياً بدقة عالية
     InitWindow(0, 0, "Mage Elements Battle");
     int screenWidth = GetScreenWidth();
     int screenHeight = GetScreenHeight();
@@ -57,7 +56,6 @@ int main(int argc, char *argv[]) {
     Vector2 wizardPos = { screenWidth * 0.18f, screenHeight * 0.68f };
     float castAnimTimer = 0.0f;
 
-    // توزيع أزرار العناصر في الأعلى بناءً على دقة الشاشة
     float btnWidth = screenWidth * 0.14f;
     float btnHeight = screenHeight * 0.11f;
     float btnY = screenHeight * 0.05f;
@@ -70,11 +68,9 @@ int main(int argc, char *argv[]) {
         { { screenWidth * 0.67f, btnY, btnWidth, btnHeight }, "WATER", { 30, 110, 230, 255 } }
     };
 
-    // زر الهجوم في الزاوية السفلية اليمنى
     Rectangle attackBtn = { screenWidth - (screenWidth * 0.22f), screenHeight - (screenHeight * 0.22f), screenWidth * 0.18f, screenHeight * 0.16f };
 
     while (!WindowShouldClose()) {
-        // إدارة لمس الشاشة
         if (GetTouchPointCount() > 0 || IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
             Vector2 inputPos = (GetTouchPointCount() > 0) ? GetTouchPosition(0) : GetMousePosition();
 
@@ -98,7 +94,6 @@ int main(int argc, char *argv[]) {
 
         if (castAnimTimer > 0.0f) castAnimTimer -= GetFrameTime();
 
-        // تحديث مقذوفات السحر وجزيئات التأثير البصري
         for (auto &s : spells) {
             if (!s.active) continue;
             s.pos = Vector2Add(s.pos, s.vel);
@@ -140,7 +135,6 @@ int main(int argc, char *argv[]) {
             if (s.pos.x > screenWidth + 60) s.active = false;
         }
 
-        // تحديث نظام الجزيئات
         for (size_t i = 0; i < particles.size();) {
             particles[i].pos = Vector2Add(particles[i].pos, particles[i].vel);
             particles[i].life += GetFrameTime();
@@ -154,21 +148,17 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        // رسم المشهد بالكامل
         BeginDrawing();
         ClearBackground({ 15, 17, 26, 255 });
 
-        // الأرضية
         DrawRectangle(0, screenHeight * 0.78f, screenWidth, screenHeight * 0.22f, { 25, 27, 40, 255 });
         DrawLine(0, screenHeight * 0.78f, screenWidth, screenHeight * 0.78f, { 60, 65, 95, 255 });
 
-        // رسم الساحر
         Color cloakColor = { 50, 55, 95, 255 };
         DrawTriangle({ wizardPos.x, wizardPos.y - 90 }, { wizardPos.x - 50, wizardPos.y + 75 }, { wizardPos.x + 50, wizardPos.y + 75 }, cloakColor);
-        DrawCircle(wizardPos.x, wizardPos.y - 95, 28, { 40, 44, 75, 255 });
-        DrawCircle(wizardPos.x + 10, wizardPos.y - 98, 6, YELLOW);
+        DrawCircle((int)wizardPos.x, (int)wizardPos.y - 95, 28, { 40, 44, 75, 255 });
+        DrawCircle((int)wizardPos.x + 10, (int)wizardPos.y - 98, 6, YELLOW);
 
-        // عصا الساحر المتوهجة بالعنصر المختار
         float staffOffset = (castAnimTimer > 0.0f) ? 18.0f : 0.0f;
         Vector2 staffTop = { wizardPos.x + 70.0f + staffOffset, wizardPos.y - 55.0f - staffOffset };
         DrawLineEx({ wizardPos.x + 50.0f, wizardPos.y + 65.0f }, staffTop, 8.0f, DARKBROWN);
@@ -178,32 +168,30 @@ int main(int argc, char *argv[]) {
         DrawCircleV(staffTop, 12.0f, gemColor);
         DrawCircleV(staffTop, 6.0f, WHITE);
 
-        // رسم مقذوفات السحر
+        // رسم مقذوفات السحر بطبقات توهج شعاعي متوافقة
         for (const auto &s : spells) {
             if (!s.active) continue;
-            DrawCircleGradient(s.pos.x, s.pos.y, 25, elemButtons[s.type].color, ColorAlpha(WHITE, 0.2f));
-            DrawCircleV(s.pos, 14, WHITE);
+            DrawCircleV(s.pos, 24.0f, ColorAlpha(elemButtons[s.type].color, 0.35f));
+            DrawCircleV(s.pos, 16.0f, elemButtons[s.type].color);
+            DrawCircleV(s.pos, 8.0f, WHITE);
         }
 
-        // رسم الجزيئات المشعة
         BeginBlendMode(BLEND_ADDITIVE);
         for (const auto &p : particles) {
             DrawCircleV(p.pos, p.size, ColorAlpha(p.color, p.alpha));
         }
         EndBlendMode();
 
-        // رسم واجهة الأزرار العلوية
         for (int i = 0; i < 5; i++) {
             bool selected = (currentElement == (ElementType)i);
             DrawRectangleRec(elemButtons[i].rect, selected ? elemButtons[i].color : ColorAlpha(elemButtons[i].color, 0.35f));
             DrawRectangleLinesEx(elemButtons[i].rect, selected ? 4.0f : 2.0f, WHITE);
-            DrawText(elemButtons[i].label, elemButtons[i].rect.x + 20, elemButtons[i].rect.y + 18, 22, WHITE);
+            DrawText(elemButtons[i].label, (int)(elemButtons[i].rect.x + 20), (int)(elemButtons[i].rect.y + 18), 22, WHITE);
         }
 
-        // زر الهجوم
         DrawRectangleRec(attackBtn, { 225, 45, 45, 255 });
         DrawRectangleLinesEx(attackBtn, 4.0f, GOLD);
-        DrawText("ATTACK", attackBtn.x + (attackBtn.width * 0.18f), attackBtn.y + (attackBtn.height * 0.32f), 28, WHITE);
+        DrawText("ATTACK", (int)(attackBtn.x + (attackBtn.width * 0.18f)), (int)(attackBtn.y + (attackBtn.height * 0.32f)), 28, WHITE);
 
         EndDrawing();
     }
