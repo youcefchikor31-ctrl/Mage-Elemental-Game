@@ -18,34 +18,31 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Build Game and Raylib
+      - name: Compile Game & Package APK
         run: |
-          # تحديد مسار الـ NDK المثبت تلقائياً على خادم جيت هوب
-          NDK_PATH=$(find $ANDROID_SDK_ROOT/ndk -maxdepth 1 -mindepth 1 | sort -V | tail -n 1)
-          echo "Using Android NDK from: $NDK_PATH"
+          # 1. تثبيت أدوات ninja للتصريف السريع
+          sudo apt-get update && sudo apt-get install -y ninja-build
 
-          # 1. تحميل وترجمة مكتبة Raylib للأندرويد
+          # 2. جلب وتجهيز مكتبة Raylib للأندرويد
           git clone --depth 1 https://github.com/raysan5/raylib.git raylib_src
-          mkdir -p build_raylib && cd build_raylib
-          cmake ../raylib_src/src \
-            -DCMAKE_TOOLCHAIN_FILE=$NDK_PATH/build/cmake/android.toolchain.cmake \
+          cmake -B build_raylib -S raylib_src/src \
+            -GNinja \
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_LATEST_HOME/build/cmake/android.toolchain.cmake \
             -DANDROID_ABI=arm64-v8a \
             -DPLATFORM=Android \
             -DANDROID_PLATFORM=26
-          make -j$(nproc)
-          cd ..
+          cmake --build build_raylib
 
-          # 2. بناء كود اللعبة C++
-          mkdir -p build_app && cd build_app
-          cmake .. \
-            -DCMAKE_TOOLCHAIN_FILE=$NDK_PATH/build/cmake/android.toolchain.cmake \
+          # 3. بناء ملف اللعبة C++
+          cmake -B build_app -S . \
+            -GNinja \
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_LATEST_HOME/build/cmake/android.toolchain.cmake \
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=26 \
-            -Draylib_DIR=../build_raylib
-          make -j$(nproc)
-          cd ..
+            -Draylib_DIR=$GITHUB_WORKSPACE/build_raylib
+          cmake --build build_app
 
-          # 3. تغليف ملف الـ APK
+          # 4. التغليف داخل قالب APK
           git clone --depth 1 https://github.com/raylib-extras/raylib-apk-template.git template
           mkdir -p template/app/src/main/jniLibs/arm64-v8a
           cp build_app/MageElements template/app/src/main/jniLibs/arm64-v8a/libmain.so
@@ -56,5 +53,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: MageGame-Debug-APK
+          name: MageGame-APK
           path: template/app/build/outputs/apk/debug/*.apk
