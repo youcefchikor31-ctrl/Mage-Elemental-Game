@@ -12,46 +12,48 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Setup Java JDK
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Android SDK and NDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install NDK
-        run: sdkmanager --install "ndk;25.2.9519653" "cmake;3.22.1"
-
-      - name: Setup Raylib Android Builder
+      - name: Build Game and Raylib
         run: |
+          # تحديد مسار الـ NDK المثبت تلقائياً على خادم جيت هوب
+          NDK_PATH=$(find $ANDROID_SDK_ROOT/ndk -maxdepth 1 -mindepth 1 | sort -V | tail -n 1)
+          echo "Using Android NDK from: $NDK_PATH"
+
+          # 1. تحميل وترجمة مكتبة Raylib للأندرويد
           git clone --depth 1 https://github.com/raysan5/raylib.git raylib_src
           mkdir -p build_raylib && cd build_raylib
-          cmake ../raylib_src/src -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake \
-            -DANDROID_ABI=arm64-v8a -DPLATFORM=Android -DANDROID_PLATFORM=26
-          make -j4
+          cmake ../raylib_src/src \
+            -DCMAKE_TOOLCHAIN_FILE=$NDK_PATH/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=arm64-v8a \
+            -DPLATFORM=Android \
+            -DANDROID_PLATFORM=26
+          make -j$(nproc)
           cd ..
 
-      - name: Build Game Binary
-        run: |
+          # 2. بناء كود اللعبة C++
           mkdir -p build_app && cd build_app
-          cmake .. -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake \
-            -DANDROID_ABI=arm64-v8a -DPLATFORM=Android -DANDROID_PLATFORM=26 \
+          cmake .. \
+            -DCMAKE_TOOLCHAIN_FILE=$NDK_PATH/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=26 \
             -Draylib_DIR=../build_raylib
-          make -j4
+          make -j$(nproc)
           cd ..
 
-      - name: Package Minimal APK
-        run: |
-          # استخدام قالب التغليف السريع المعتمد في Raylib Android
+          # 3. تغليف ملف الـ APK
           git clone --depth 1 https://github.com/raylib-extras/raylib-apk-template.git template
+          mkdir -p template/app/src/main/jniLibs/arm64-v8a
           cp build_app/MageElements template/app/src/main/jniLibs/arm64-v8a/libmain.so
           cd template
           chmod +x gradlew
           ./gradlew assembleDebug
 
-      - name: Upload APK Artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: MageGame-Debug-APK
