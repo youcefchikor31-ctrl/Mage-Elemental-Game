@@ -21,6 +21,7 @@ struct Particle {
     float life;
     float maxLife;
     bool additive;
+    float drag; // 0..1, applied per second (higher = more friction)
 };
 
 struct IceCrystal {
@@ -66,9 +67,34 @@ struct Enemy {
 
 struct FloatingText {
     Vector2 pos;
-    char text[16];
+    char text[24];
     Color color;
     float life;
+    float maxLife;
+    float size;
+};
+
+// أثر أرضي: صقيع / تشقق / حلقة ماء / حرق - يعيش على الأرض ويتلاشى
+struct GroundEffect {
+    Vector2 pos;
+    float radius;
+    float maxRadius;
+    float life;
+    float maxLife;
+    Color color;
+    int type; // 0 ripple(water) 1 crack(earth) 2 frost(ice) 3 scorch(fire)
+    float angle;
+};
+
+// موجة صدمة دائرية عند الإصابة أو الموت
+struct Shockwave {
+    Vector2 pos;
+    float radius;
+    float maxRadius;
+    float life;
+    float maxLife;
+    Color color;
+    float thickness;
 };
 
 #if defined(__cplusplus)
@@ -98,6 +124,7 @@ int main(int argc, char *argv[]) {
     camera.target = playerPos;
     camera.offset = { screenWidth / 2.0f, screenHeight / 2.0f };
     camera.zoom = 1.0f;
+    float zoomPunch = 0.0f; // نبضة تكبير عند القذف/الإصابة، تعود تدريجياً لـ0
 
     // عناصر التحكم باللمس المتعدد (Touch Controls)
     Vector2 stickCenter = { screenWidth * 0.14f, screenHeight * 0.74f };
@@ -132,31 +159,89 @@ int main(int argc, char *argv[]) {
 
     // مصفوفات الكائنات في اللعبة
     std::vector<Particle> particles;
+    std::vector<Particle> ambientDust; // غبار محيطي جوي في الساحة
     std::vector<IceCrystal> iceCrystals;
     std::vector<RockFragment> rocks;
     std::vector<Spell> spells;
     std::vector<Enemy> enemies;
     std::vector<FloatingText> floatTexts;
+    std::vector<GroundEffect> groundEffects;
+    std::vector<Shockwave> shockwaves;
 
     float spawnTimer = 0.0f;
     float screenShake = 0.0f;
     int score = 0;
     bool gameOver = false;
 
+    // نظام الموجات (Waves)
+    int wave = 1;
+    float waveTimer = 0.0f;
+    const float waveDuration = 25.0f;
+    float waveAnnounceTimer = 0.0f;
+    char waveAnnounceText[32] = "";
+
+    // نظام الكومبو
+    int comboCount = 0;
+    float comboTimer = 0.0f;
+    const float comboWindow = 1.4f;
+
+    // تهيئة غبار محيطي أولي
+    for (int i = 0; i < 60; i++) {
+        Particle d;
+        d.pos = { (float)GetRandomValue(0, (int)arenaSize), (float)GetRandomValue(0, (int)arenaSize) };
+        d.vel = { (float)GetRandomValue(-8, 8), (float)GetRandomValue(-8, 8) };
+        d.color = { 120, 130, 170, 255 };
+        d.size = (float)GetRandomValue(2, 5);
+        d.alpha = (float)GetRandomValue(20, 60) / 100.0f;
+        d.life = 0.0f;
+        d.maxLife = 999999.0f;
+        d.additive = false;
+        d.drag = 0.0f;
+        ambientDust.push_back(d);
+    }
+
     while (!WindowShouldClose()) {
         float dt = GetFrameTime();
         if (dt > 0.1f) dt = 0.1f;
+        float gameTime = (float)GetTime();
 
         if (!gameOver) {
             // تجديد المانا تلقائياً
             if (playerMana < playerMaxMana) playerMana += 18.0f * dt;
+
+            // تقليل نبضة التكبير تدريجياً
+            if (zoomPunch > 0.0f) {
+                zoomPunch -= dt * 3.0f;
+                if (zoomPunch < 0.0f) zoomPunch = 0.0f;
+            }
+
+            // تحديث مؤقت الكومبو
+            if (comboTimer > 0.0f) {
+                comboTimer -= dt;
+                if (comboTimer <= 0.0f) comboCount = 0;
+            }
+
+            // نظام الموجات: كل waveDuration ثانية تزيد صعوبة الوحوش
+            waveTimer += dt;
+            if (waveTimer >= waveDuration) {
+                waveTimer = 0.0f;
+                wave++;
+                snprintf(waveAnnounceText, sizeof(waveAnnounceText), "WAVE %d", wave);
+                waveAnnounceTimer = 2.2f;
+            }
+            if (waveAnnounceTimer > 0.0f) waveAnnounceTimer -= dt;
 
             // --- 1. معالجة اللمس المتعدد للهواتف (Multi-touch System) ---
             stickTouchFound = false;
             Vector2 moveDir = { 0.0f, 0.0f };
             int touchCount = GetTouchPointCount();
 
-            for (int i = 0; i < touchCount || (touchCount == 0 && IsMouseButtonDown(MOUSE_BUTTON_LEFT)); i++) {
+            // إصلاح: عدّاد إدخال صحيح بدل شرط حلقة كان يسبب تعليقاً لا نهائياً
+            // عند استخدام الماوس (touchCount == 0) في النسخة الأصلية
+            int inputCount = (touchCount > 0) ? touchCount
+                                               : (IsMouseButtonDown(MOUSE_BUTTON_LEFT) ? 1 : 0);
+
+            for (int i = 0; i < inputCount; i++) {
                 Vector2 tPos = (touchCount > 0) ? GetTouchPosition(i) : GetMousePosition();
 
                 // ذراع التحكم في الجهة اليسرى
@@ -184,6 +269,7 @@ int main(int argc, char *argv[]) {
                     bool canCast = (touchCount > 0) ? IsGestureDetected(GESTURE_TAP) || IsGestureDetected(GESTURE_HOLD) : IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
                     if (canCast && playerMana >= 15.0f) {
                         playerMana -= 15.0f;
+                        zoomPunch = 0.06f; // نبضة تكبير بصرية عند القذف
                         Vector2 targetCastDir = playerFacing;
 
                         // توجيه تلقائي نحو أقرب وحش إن وجد
@@ -233,6 +319,23 @@ int main(int argc, char *argv[]) {
                             sp.life = 1.5f;
                         }
                         spells.push_back(sp);
+
+                        // نبضة توهج انطلاق عند طرف العصا
+                        for (int k = 0; k < 10; k++) {
+                            Particle p;
+                            p.pos = sp.pos;
+                            float a = (float)GetRandomValue(0, 360) * DEG2RAD;
+                            float spd = (float)GetRandomValue(60, 180);
+                            p.vel = { cosf(a) * spd, sinf(a) * spd };
+                            p.color = elemColors[currentElement];
+                            p.size = (float)GetRandomValue(4, 10);
+                            p.alpha = 1.0f;
+                            p.life = 0.0f;
+                            p.maxLife = 0.3f;
+                            p.additive = true;
+                            p.drag = 2.0f;
+                            particles.push_back(p);
+                        }
                     }
                 }
             }
@@ -244,9 +347,26 @@ int main(int argc, char *argv[]) {
             playerPos.x = Clamp(playerPos.x, 60.0f, arenaSize - 60.0f);
             playerPos.y = Clamp(playerPos.y, 60.0f, arenaSize - 60.0f);
 
+            // أثر خطوات خفيف عند الحركة
+            if (Vector2Length(moveDir) > 0.2f && GetRandomValue(0, 4) == 0) {
+                Particle p;
+                p.pos = Vector2Add(playerPos, { (float)GetRandomValue(-6, 6), 18.0f });
+                p.vel = { 0, -10.0f };
+                p.color = { 200, 200, 220, 255 };
+                p.size = (float)GetRandomValue(3, 6);
+                p.alpha = 0.5f;
+                p.life = 0.0f;
+                p.maxLife = 0.4f;
+                p.additive = false;
+                p.drag = 1.0f;
+                particles.push_back(p);
+            }
+
             // --- 2. توليد وتحديث الوحوش والذكاء الاصطناعي ---
             spawnTimer += dt;
-            if (spawnTimer >= 1.6f && enemies.size() < 40) {
+            float spawnInterval = fmaxf(0.5f, 1.6f - (wave - 1) * 0.12f);
+            int maxEnemies = 40 + (wave - 1) * 6;
+            if (spawnTimer >= spawnInterval && (int)enemies.size() < maxEnemies) {
                 spawnTimer = 0.0f;
                 Enemy en;
                 float angle = (float)GetRandomValue(0, 360) * DEG2RAD;
@@ -256,21 +376,23 @@ int main(int argc, char *argv[]) {
                 en.hitTimer = 0.0f;
                 en.freezeTimer = 0.0f;
 
+                float waveMul = 1.0f + (wave - 1) * 0.10f;
+
                 // تنوع الوحوش
                 int rType = GetRandomValue(0, 2);
                 if (rType == 0) { // زاحف سريع (Chaser)
-                    en.hp = en.maxHp = 60.0f;
-                    en.speed = 175.0f;
+                    en.hp = en.maxHp = 60.0f * waveMul;
+                    en.speed = 175.0f + (wave - 1) * 4.0f;
                     en.radius = 20.0f;
                     en.color = { 180, 40, 40, 255 };
                 } else if (rType == 1) { // غول صخري ضخم (Golem)
-                    en.hp = en.maxHp = 180.0f;
-                    en.speed = 95.0f;
+                    en.hp = en.maxHp = 180.0f * waveMul;
+                    en.speed = 95.0f + (wave - 1) * 2.0f;
                     en.radius = 34.0f;
                     en.color = { 90, 85, 95, 255 };
                 } else { // شبح الظل (Shadow)
-                    en.hp = en.maxHp = 90.0f;
-                    en.speed = 135.0f;
+                    en.hp = en.maxHp = 90.0f * waveMul;
+                    en.speed = 135.0f + (wave - 1) * 3.0f;
                     en.radius = 24.0f;
                     en.color = { 75, 30, 110, 255 };
                 }
@@ -284,6 +406,20 @@ int main(int argc, char *argv[]) {
 
                 if (en.freezeTimer > 0.0f) {
                     en.freezeTimer -= dt;
+                    // جزيئات صقيع خفيفة على الوحش المتجمد
+                    if (GetRandomValue(0, 6) == 0) {
+                        Particle p;
+                        p.pos = Vector2Add(en.pos, { (float)GetRandomValue(-10, 10), (float)GetRandomValue(-10, 10) });
+                        p.vel = { 0, -12.0f };
+                        p.color = SKYBLUE;
+                        p.size = (float)GetRandomValue(3, 6);
+                        p.alpha = 0.8f;
+                        p.life = 0.0f;
+                        p.maxLife = 0.35f;
+                        p.additive = true;
+                        p.drag = 0.5f;
+                        particles.push_back(p);
+                    }
                     continue; // متجمد بالكامل
                 }
 
@@ -308,12 +444,13 @@ int main(int argc, char *argv[]) {
             // --- 3. فيزياء المقذوفات وتأثيرات العناصر الحقيقية ---
             for (auto &sp : spells) {
                 if (!sp.active) continue;
+                Vector2 prevPos = sp.pos;
                 sp.pos = Vector2Add(sp.pos, Vector2Scale(sp.vel, dt));
                 sp.timer += dt;
                 sp.life -= dt;
                 if (sp.life <= 0.0f) sp.active = false;
 
-                // سلوك النار (لهب مشتعل ودخان)
+                // سلوك النار (لهب مشتعل ودخان + شرر)
                 if (sp.type == ELEM_FIRE) {
                     for (int k = 0; k < 4; k++) {
                         Particle p;
@@ -325,10 +462,25 @@ int main(int argc, char *argv[]) {
                         p.life = 0.0f;
                         p.maxLife = 0.4f;
                         p.additive = true;
+                        p.drag = 0.5f;
+                        particles.push_back(p);
+                    }
+                    // دخان خفيف خلف الكرة النارية
+                    if (GetRandomValue(0, 1) == 0) {
+                        Particle p;
+                        p.pos = sp.pos;
+                        p.vel = { (float)GetRandomValue(-15, 15), (float)GetRandomValue(-40, -10) };
+                        p.color = { 70, 70, 70, 255 };
+                        p.size = (float)GetRandomValue(10, 18);
+                        p.alpha = 0.35f;
+                        p.life = 0.0f;
+                        p.maxLife = 0.6f;
+                        p.additive = false;
+                        p.drag = 0.3f;
                         particles.push_back(p);
                     }
                 }
-                // سلوك الثلج: يزرع بلورات متجمدة في مساره
+                // سلوك الثلج: يزرع بلورات متجمدة في مساره + صقيع أرضي
                 else if (sp.type == ELEM_ICE) {
                     if (GetRandomValue(0, 2) == 0) {
                         IceCrystal ic;
@@ -339,6 +491,16 @@ int main(int argc, char *argv[]) {
                         ic.angle = (float)GetRandomValue(-25, 25);
                         ic.life = 2.0f;
                         iceCrystals.push_back(ic);
+
+                        GroundEffect ge;
+                        ge.pos = sp.pos;
+                        ge.radius = 0.0f;
+                        ge.maxRadius = (float)GetRandomValue(20, 36);
+                        ge.life = ge.maxLife = 1.2f;
+                        ge.color = ColorAlpha(SKYBLUE, 0.5f);
+                        ge.type = 2;
+                        ge.angle = 0;
+                        groundEffects.push_back(ge);
                     }
                     Particle p;
                     p.pos = sp.pos;
@@ -349,9 +511,10 @@ int main(int argc, char *argv[]) {
                     p.life = 0.0f;
                     p.maxLife = 0.35f;
                     p.additive = true;
+                    p.drag = 0.5f;
                     particles.push_back(p);
                 }
-                // سلوك صخور الأرض: ينبثق حطام وشظايا صلبة
+                // سلوك صخور الأرض: ينبثق حطام وشظايا صلبة + تشققات
                 else if (sp.type == ELEM_EARTH) {
                     RockFragment rf;
                     rf.pos = sp.pos;
@@ -361,23 +524,51 @@ int main(int argc, char *argv[]) {
                     rf.rotSpeed = (float)GetRandomValue(-180, 180);
                     rf.life = 1.2f;
                     rocks.push_back(rf);
-                }
-                // سلوك الرياح: شفرات دوارة
-                else if (sp.type == ELEM_WIND) {
-                    for (int k = 0; k < 3; k++) {
+
+                    if (GetRandomValue(0, 2) == 0) {
+                        GroundEffect ge;
+                        ge.pos = sp.pos;
+                        ge.radius = 0.0f;
+                        ge.maxRadius = (float)GetRandomValue(24, 40);
+                        ge.life = ge.maxLife = 1.0f;
+                        ge.color = ColorAlpha(BROWN, 0.6f);
+                        ge.type = 1;
+                        ge.angle = (float)GetRandomValue(0, 360);
+                        groundEffects.push_back(ge);
+                    }
+                    // غبار ترابي
+                    for (int k = 0; k < 2; k++) {
                         Particle p;
                         p.pos = sp.pos;
-                        p.vel = { cosf(sp.timer * 20.0f + k) * 90.0f, sinf(sp.timer * 20.0f + k) * 90.0f };
-                        p.color = LIME;
-                        p.size = (float)GetRandomValue(8, 18);
-                        p.alpha = 0.8f;
+                        p.vel = { (float)GetRandomValue(-25, 25), (float)GetRandomValue(-15, 5) };
+                        p.color = { 140, 120, 90, 255 };
+                        p.size = (float)GetRandomValue(6, 14);
+                        p.alpha = 0.5f;
                         p.life = 0.0f;
-                        p.maxLife = 0.25f;
-                        p.additive = true;
+                        p.maxLife = 0.5f;
+                        p.additive = false;
+                        p.drag = 0.4f;
                         particles.push_back(p);
                     }
                 }
-                // سلوك الماء: موجة جيبية ورذاذ فقاعات
+                // سلوك الرياح: شفرات دوارة (إعصار)
+                else if (sp.type == ELEM_WIND) {
+                    for (int k = 0; k < 4; k++) {
+                        Particle p;
+                        p.pos = sp.pos;
+                        float spiralA = sp.timer * 22.0f + k * (PI * 0.5f);
+                        p.vel = { cosf(spiralA) * 110.0f, sinf(spiralA) * 110.0f };
+                        p.color = (k % 2 == 0) ? LIME : (Color){ 200, 255, 220, 255 };
+                        p.size = (float)GetRandomValue(6, 16);
+                        p.alpha = 0.85f;
+                        p.life = 0.0f;
+                        p.maxLife = 0.22f;
+                        p.additive = true;
+                        p.drag = 1.5f;
+                        particles.push_back(p);
+                    }
+                }
+                // سلوك الماء: موجة جيبية ورذاذ فقاعات + حلقات تموج
                 else if (sp.type == ELEM_WATER) {
                     Vector2 wavePos = sp.pos;
                     wavePos.y += sinf(sp.timer * 16.0f) * 18.0f;
@@ -391,7 +582,19 @@ int main(int argc, char *argv[]) {
                         p.life = 0.0f;
                         p.maxLife = 0.35f;
                         p.additive = true;
+                        p.drag = 0.6f;
                         particles.push_back(p);
+                    }
+                    if (GetRandomValue(0, 3) == 0) {
+                        GroundEffect ge;
+                        ge.pos = sp.pos;
+                        ge.radius = 0.0f;
+                        ge.maxRadius = (float)GetRandomValue(18, 30);
+                        ge.life = ge.maxLife = 0.7f;
+                        ge.color = ColorAlpha(SKYBLUE, 0.5f);
+                        ge.type = 0;
+                        ge.angle = 0;
+                        groundEffects.push_back(ge);
                     }
                 }
 
@@ -405,12 +608,23 @@ int main(int argc, char *argv[]) {
                         if (sp.type == ELEM_ICE) en.freezeTimer = 1.8f; // تجميد الوحش
                         if (sp.type == ELEM_EARTH) en.pos = Vector2Add(en.pos, Vector2Scale(playerFacing, 35.0f)); // دفع قوي
 
+                        // موجة صدمة عند الإصابة
+                        Shockwave sw;
+                        sw.pos = en.pos;
+                        sw.radius = 0.0f;
+                        sw.maxRadius = en.radius * 1.8f;
+                        sw.life = sw.maxLife = 0.25f;
+                        sw.color = elemColors[sp.type];
+                        sw.thickness = 3.0f;
+                        shockwaves.push_back(sw);
+
                         // نص ضرر عائم
                         FloatingText ft;
                         ft.pos = en.pos;
                         snprintf(ft.text, sizeof(ft.text), "-%d", (int)sp.damage);
                         ft.color = elemColors[sp.type];
-                        ft.life = 0.6f;
+                        ft.life = ft.maxLife = 0.6f;
+                        ft.size = 22.0f;
                         floatTexts.push_back(ft);
 
                         // انفجار بصري عند الإصابة
@@ -424,12 +638,57 @@ int main(int argc, char *argv[]) {
                             p.life = 0.0f;
                             p.maxLife = 0.45f;
                             p.additive = true;
+                            p.drag = 0.4f;
                             particles.push_back(p);
                         }
 
                         if (en.hp <= 0.0f) {
                             en.active = false;
-                            score += 100;
+
+                            // كومبو
+                            comboCount++;
+                            comboTimer = comboWindow;
+                            int mult = 1 + (comboCount / 3);
+                            int gained = 100 * mult;
+                            score += gained;
+
+                            // نص كومبو إذا أعلى من 1
+                            if (comboCount >= 2) {
+                                FloatingText ct;
+                                ct.pos = Vector2Add(en.pos, { 0, -30 });
+                                snprintf(ct.text, sizeof(ct.text), "COMBO x%d", comboCount);
+                                ct.color = GOLD;
+                                ct.life = ct.maxLife = 0.8f;
+                                ct.size = 20.0f;
+                                floatTexts.push_back(ct);
+                            }
+
+                            // موجة صدمة موت أكبر
+                            Shockwave dsw;
+                            dsw.pos = en.pos;
+                            dsw.radius = 0.0f;
+                            dsw.maxRadius = en.radius * 3.0f;
+                            dsw.life = dsw.maxLife = 0.4f;
+                            dsw.color = elemColors[sp.type];
+                            dsw.thickness = 4.0f;
+                            shockwaves.push_back(dsw);
+
+                            // انفجار موت أكبر
+                            for (int k = 0; k < 26; k++) {
+                                Particle p;
+                                p.pos = en.pos;
+                                float a = (float)GetRandomValue(0, 360) * DEG2RAD;
+                                float spd = (float)GetRandomValue(80, 260);
+                                p.vel = { cosf(a) * spd, sinf(a) * spd };
+                                p.color = (GetRandomValue(0, 1) == 0) ? elemColors[sp.type] : WHITE;
+                                p.size = (float)GetRandomValue(5, 14);
+                                p.alpha = 1.0f;
+                                p.life = 0.0f;
+                                p.maxLife = 0.5f;
+                                p.additive = true;
+                                p.drag = 0.6f;
+                                particles.push_back(p);
+                            }
                         }
 
                         // السحر الصلب يخترق، والسحر الانفجاري ينفجر
@@ -445,7 +704,13 @@ int main(int argc, char *argv[]) {
                 playerPos = { 1000.0f, 1000.0f };
                 enemies.clear();
                 spells.clear();
+                groundEffects.clear();
+                shockwaves.clear();
                 score = 0;
+                wave = 1;
+                waveTimer = 0.0f;
+                comboCount = 0;
+                comboTimer = 0.0f;
                 gameOver = false;
             }
         }
@@ -468,12 +733,21 @@ int main(int argc, char *argv[]) {
         }
 
         for (size_t i = 0; i < particles.size();) {
+            float dragFactor = 1.0f - Clamp(particles[i].drag * dt, 0.0f, 0.9f);
+            particles[i].vel = Vector2Scale(particles[i].vel, dragFactor);
             particles[i].pos = Vector2Add(particles[i].pos, Vector2Scale(particles[i].vel, dt));
             particles[i].life += dt;
             particles[i].alpha = 1.0f - (particles[i].life / particles[i].maxLife);
             particles[i].size *= 0.95f;
             if (particles[i].life >= particles[i].maxLife) particles.erase(particles.begin() + i);
             else i++;
+        }
+
+        // تحديث الغبار المحيطي (يتجول ببطء داخل الساحة)
+        for (auto &d : ambientDust) {
+            d.pos = Vector2Add(d.pos, Vector2Scale(d.vel, dt));
+            if (d.pos.x < 0 || d.pos.x > arenaSize) d.vel.x *= -1;
+            if (d.pos.y < 0 || d.pos.y > arenaSize) d.vel.y *= -1;
         }
 
         for (size_t i = 0; i < floatTexts.size();) {
@@ -483,8 +757,25 @@ int main(int argc, char *argv[]) {
             else i++;
         }
 
-        // تحديث الكاميرا مع اهتزاز الشاشة (Screen Shake)
+        for (size_t i = 0; i < groundEffects.size();) {
+            groundEffects[i].life -= dt;
+            float t = 1.0f - (groundEffects[i].life / groundEffects[i].maxLife);
+            groundEffects[i].radius = groundEffects[i].maxRadius * t;
+            if (groundEffects[i].life <= 0.0f) groundEffects.erase(groundEffects.begin() + i);
+            else i++;
+        }
+
+        for (size_t i = 0; i < shockwaves.size();) {
+            shockwaves[i].life -= dt;
+            float t = 1.0f - (shockwaves[i].life / shockwaves[i].maxLife);
+            shockwaves[i].radius = shockwaves[i].maxRadius * t;
+            if (shockwaves[i].life <= 0.0f) shockwaves.erase(shockwaves.begin() + i);
+            else i++;
+        }
+
+        // تحديث الكاميرا مع اهتزاز الشاشة (Screen Shake) ونبضة التكبير
         camera.target = playerPos;
+        camera.zoom = 1.0f + zoomPunch;
         if (screenShake > 0.0f) {
             camera.target.x += (float)GetRandomValue(-12, 12);
             camera.target.y += (float)GetRandomValue(-12, 12);
@@ -502,6 +793,30 @@ int main(int argc, char *argv[]) {
         for (int x = 0; x < (int)arenaSize; x += 100) DrawLine(x, 0, x, (int)arenaSize, { 32, 36, 52, 255 });
         for (int y = 0; y < (int)arenaSize; y += 100) DrawLine(0, y, (int)arenaSize, y, { 32, 36, 52, 255 });
         DrawRectangleLinesEx({ 0, 0, arenaSize, arenaSize }, 8.0f, { 80, 90, 130, 255 });
+
+        // غبار محيطي خافت (طبقة جوية خلف كل شيء)
+        for (const auto &d : ambientDust) {
+            DrawCircleV(d.pos, d.size, ColorAlpha(d.color, d.alpha));
+        }
+
+        // آثار أرضية (صقيع/تشقق/تموج/حرق)
+        for (const auto &ge : groundEffects) {
+            float t = ge.life / ge.maxLife;
+            Color c = ColorAlpha(ge.color, ge.color.a / 255.0f * t);
+            if (ge.type == 0) { // ripple
+                DrawCircleLines((int)ge.pos.x, (int)ge.pos.y, ge.radius, c);
+            } else if (ge.type == 1) { // crack
+                for (int k = 0; k < 5; k++) {
+                    float a = ge.angle + k * 72.0f;
+                    Vector2 end = { ge.pos.x + cosf(a * DEG2RAD) * ge.radius, ge.pos.y + sinf(a * DEG2RAD) * ge.radius };
+                    DrawLineEx(ge.pos, end, 2.0f, c);
+                }
+            } else if (ge.type == 2) { // frost
+                DrawCircleV(ge.pos, ge.radius, c);
+            } else { // scorch
+                DrawCircleV(ge.pos, ge.radius, c);
+            }
+        }
 
         // رسم بلورات الثلج البارزة
         for (const auto &ic : iceCrystals) {
@@ -522,6 +837,8 @@ int main(int argc, char *argv[]) {
         for (const auto &en : enemies) {
             if (!en.active) continue;
             Color drawCol = (en.hitTimer > 0.0f) ? WHITE : ((en.freezeTimer > 0.0f) ? SKYBLUE : en.color);
+            // ظل خفيف تحت الوحش
+            DrawEllipse((int)en.pos.x, (int)(en.pos.y + en.radius * 0.6f), en.radius * 0.9f, en.radius * 0.35f, ColorAlpha(BLACK, 0.35f));
             DrawCircleV(en.pos, en.radius, drawCol);
             DrawCircleLines((int)en.pos.x, (int)en.pos.y, en.radius, BLACK);
 
@@ -531,19 +848,35 @@ int main(int argc, char *argv[]) {
             DrawRectangle((int)(en.pos.x - en.radius), (int)(en.pos.y - en.radius - 12), (int)(barW * (en.hp / en.maxHp)), 5, GREEN);
         }
 
-        // رسم مقذوفات السحر
+        // موجات الصدمة (حلقات متمددة)
+        for (const auto &sw : shockwaves) {
+            float t = sw.life / sw.maxLife;
+            DrawCircleLines((int)sw.pos.x, (int)sw.pos.y, sw.radius, ColorAlpha(sw.color, t));
+        }
+
+        // رسم مقذوفات السحر مع هالة توهج
         for (const auto &sp : spells) {
             if (!sp.active) continue;
+            DrawCircleV(sp.pos, sp.radius * 2.0f, ColorAlpha(elemColors[sp.type], 0.12f));
             DrawCircleV(sp.pos, sp.radius * 1.3f, ColorAlpha(elemColors[sp.type], 0.35f));
             DrawCircleV(sp.pos, sp.radius, elemColors[sp.type]);
             DrawCircleV(sp.pos, sp.radius * 0.45f, WHITE);
         }
 
-        // رسم الجزيئات بتوهج متراكب
+        // رسم الجزيئات بتوهج متراكب (additive) والباقي عادي
         BeginBlendMode(BLEND_ADDITIVE);
         for (const auto &p : particles) {
-            DrawCircleV(p.pos, p.size, ColorAlpha(p.color, p.alpha));
+            if (p.additive) DrawCircleV(p.pos, p.size, ColorAlpha(p.color, p.alpha));
         }
+        EndBlendMode();
+        for (const auto &p : particles) {
+            if (!p.additive) DrawCircleV(p.pos, p.size, ColorAlpha(p.color, p.alpha));
+        }
+
+        // هالة الساحر بلون العنصر الحالي (نبض خفيف)
+        float auraPulse = 4.0f + sinf(gameTime * 4.0f) * 2.0f;
+        BeginBlendMode(BLEND_ADDITIVE);
+        DrawCircleV(playerPos, 28.0f + auraPulse, ColorAlpha(elemColors[currentElement], 0.25f));
         EndBlendMode();
 
         // رسم الساحر (الشخصية)
@@ -555,9 +888,11 @@ int main(int argc, char *argv[]) {
         DrawCircleV(staffPos, 10.0f, elemColors[currentElement]);
         DrawCircleV(staffPos, 5.0f, WHITE);
 
-        // أرقام الضرر العائمة
+        // أرقام الضرر والكومبو العائمة
         for (const auto &ft : floatTexts) {
-            DrawText(ft.text, (int)ft.pos.x, (int)ft.pos.y, 22, ft.color);
+            float t = ft.life / ft.maxLife;
+            Color c = ColorAlpha(ft.color, t);
+            DrawText(ft.text, (int)ft.pos.x, (int)ft.pos.y, (int)ft.size, c);
         }
 
         EndMode2D();
@@ -582,8 +917,22 @@ int main(int argc, char *argv[]) {
         DrawRectangleLines(30, screenHeight - 35, 220, 18, WHITE);
         DrawText("MANA", 35, screenHeight - 33, 14, WHITE);
 
-        // نقاط القتل
+        // نقاط القتل والموجة
         DrawText(TextFormat("SCORE: %d", score), 30, (int)(btnY + btnH + 15), 24, GOLD);
+        DrawText(TextFormat("WAVE: %d", wave), 30, (int)(btnY + btnH + 45), 20, RAYWHITE);
+
+        // إعلان الموجة الجديدة في وسط الشاشة
+        if (waveAnnounceTimer > 0.0f) {
+            float a = Clamp(waveAnnounceTimer / 2.2f, 0.0f, 1.0f);
+            int tw = MeasureText(waveAnnounceText, 48);
+            DrawText(waveAnnounceText, screenWidth / 2 - tw / 2, screenHeight / 2 - 140, 48, ColorAlpha(GOLD, a));
+        }
+
+        // فيغنيت أحمر ينبض عند انخفاض الصحة
+        if (playerHp < playerMaxHp * 0.3f) {
+            float pulse = 0.25f + 0.2f * sinf(gameTime * 6.0f);
+            DrawRectangle(0, 0, screenWidth, screenHeight, ColorAlpha(RED, pulse * 0.35f));
+        }
 
         // ذراع التحكم (Virtual Joystick)
         DrawCircleV(stickCenter, stickBaseRadius, ColorAlpha(DARKGRAY, 0.45f));
@@ -600,7 +949,7 @@ int main(int argc, char *argv[]) {
             DrawRectangle(0, 0, screenWidth, screenHeight, ColorAlpha(BLACK, 0.8f));
             DrawText("YOU WERE OVERWHELMED!", screenWidth / 2 - 240, screenHeight / 2 - 50, 36, RED);
             DrawText("TAP ANYWHERE TO RETRY", screenWidth / 2 - 180, screenHeight / 2 + 20, 26, WHITE);
-            DrawText(TextFormat("FINAL SCORE: %d", score), screenWidth / 2 - 120, screenHeight / 2 + 70, 28, GOLD);
+            DrawText(TextFormat("FINAL SCORE: %d   WAVE: %d", score, wave), screenWidth / 2 - 160, screenHeight / 2 + 70, 28, GOLD);
         }
 
         EndDrawing();
